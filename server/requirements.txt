@@ -1,0 +1,12 @@
+# torch comes preinstalled in the RunPod PyTorch image (2.4.0, CUDA 12.4).
+# StreamDiffusion is installed separately with --no-deps (see scripts/setup.sh)
+# because its setup.py pins packages that no longer resolve together.
+# These versions are pinned to ones that work with StreamDiffusion's diffusers 0.24.
+diffusers==0.24.0
+huggingface_hub==0.25.2
+transformers==4.44.2
+accelerate==0.34.2
+numpy<2
+pillow
+aiohttp>=3.9
+aiortc>=1.9
