@@ -17,7 +17,7 @@ phone camera ─▶ canvas (square crop + frame-ID code) ─▶ WebRTC ─▶ ai
   server timings (queue, decode, pre, infer, post, encode) plus the leftover
   network + codec + buffering time.
 
-Setup on RunPod, step by step: **[RUNPOD.md](RUNPOD.md)**.
+Setup, step by step: **[RUNPOD.md](RUNPOD.md)** or **[DIGITALOCEAN.md](DIGITALOCEAN.md)** (direct WebRTC, EU region).
 
 ## How the latency number is measured
 
