@@ -19,6 +19,18 @@ phone camera ─▶ canvas (square crop + frame-ID code) ─▶ WebRTC ─▶ ai
 
 Setup, step by step: **[RUNPOD.md](RUNPOD.md)** or **[DIGITALOCEAN.md](DIGITALOCEAN.md)** (direct WebRTC, EU region).
 
+## Decart mode (hosted model, best quality)
+
+**Link → Decart (cloud)** sends the camera straight to Decart's real-time
+video model (`lucy-restyle-2`, 720p) over WebRTC instead of to our GPU. Our
+server only mints a 5-minute client token, so the API key never reaches the
+phone. Billed by Decart at about $0.01 per second of streaming.
+
+```
+export DECART_API_KEY=...        # from platform.decart.ai
+bash scripts/run.sh              # or: python server/app.py --backend fake (no GPU needed)
+```
+
 ## How the latency number is measured
 
 Over WebRTC you can't tag a video frame with an ID, so the phone paints a

@@ -194,6 +194,32 @@ async function startCamera() {
   armCamera();
 }
 
+// ---- transport 3: Decart's hosted real-time video model (no GPU of ours) ----
+const DECART_SDK = "https://cdn.jsdelivr.net/npm/@decartai/sdk@0.2.12/+esm";
+async function startDecart() {
+  const tok = await fetch("decart-token", { method: "POST" });
+  if (!tok.ok) throw new Error(await tok.text());
+  const { apiKey } = await tok.json();
+  const { createDecartClient, models } = await import(DECART_SDK);
+  const model = (S.dmodel = models.realtime("lucy-restyle-2"));
+  cam.srcObject = await decartCamera();
+  $("view").classList.add("wide");
+  S.decart = await createDecartClient({ apiKey }).realtime.connect(cam.srcObject, {
+    model,
+    initialState: { prompt: { text: currentPrompt() } },
+    onRemoteStream: (s) => { out.srcObject = s; out.play().catch(() => {}); },
+  });
+  S.decart.on("stats", (s) => { S.dstats = s; });
+}
+// Decart wants the camera at its model's input size (1280x704).
+const decartCamera = () => navigator.mediaDevices.getUserMedia({
+  video: { facingMode: S.facing, width: S.dmodel.width, height: S.dmodel.height, frameRate: S.dmodel.fps }, audio: false,
+});
+
+function currentPrompt() {
+  return $("prompt").value.trim() && !currentStyle() ? $("prompt").value.trim() : S.cfg.prompts[currentStyle()];
+}
+
 function stopTransport() {
   S.pc?.close(); S.ws?.close();
   S.pc = S.dc = S.ws = null; S.inflight = 0;
@@ -202,6 +228,12 @@ function stopTransport() {
 async function start() {
   S.cfg = await (await fetch("config")).json();
   S.server = S.cfg;
+  if ($("mode").value === "decart") {
+    S.mode = "decart"; S.running = true; S.note = "connecting to Decart…";
+    await startDecart();
+    S.note = "";
+    return;
+  }
   S.res = +$("res").value;
   capture.width = capture.height = S.res;
   await startCamera();
@@ -239,13 +271,15 @@ $("styles").onclick = (e) => {
   const style = e.target.dataset?.style;
   if (!style) return;
   document.querySelectorAll("#styles button").forEach((b) => b.classList.toggle("on", b === e.target));
-  sendControl({ type: "config", style });
+  if (S.decart) S.decart.setPrompt(S.cfg.prompts[style]);
+  else sendControl({ type: "config", style });
 };
 $("apply").onclick = () => {
   const prompt = $("prompt").value.trim();
   if (!prompt) return;
   document.querySelectorAll("#styles button").forEach((b) => b.classList.remove("on"));
-  sendControl({ type: "config", prompt });
+  if (S.decart) S.decart.setPrompt(prompt);
+  else sendControl({ type: "config", prompt });
 };
 $("res").onchange = () => {
   S.res = +$("res").value;
@@ -256,7 +290,11 @@ $("res").onchange = () => {
 $("strength").onchange = () => sendConfig();
 $("flip").onclick = async () => {
   S.facing = S.facing === "environment" ? "user" : "environment";
-  if (S.running) await startCamera();
+  if (S.decart) {
+    cam.srcObject.getTracks().forEach((t) => t.stop());
+    cam.srcObject = await decartCamera();
+    await S.decart.replaceVideoTrack(cam.srcObject.getVideoTracks()[0]);
+  } else if (S.running) await startCamera();
 };
 
 // ---- HUD ----
@@ -266,6 +304,18 @@ setInterval(() => {
 }, 1000);
 setInterval(() => {
   if (!S.running) return;
+  if (S.mode === "decart") {
+    const g = S.dstats?.glassToGlass, v = S.dstats?.video;
+    hud.textContent = [
+      `Decart · lucy-restyle-2 · ${currentStyle() || "custom"}`,
+      `FPS   shown ${(v?.framesPerSecond ?? 0).toFixed(0)}`,
+      `E2E   ${g?.medianMs?.toFixed(0) ?? "…"} ms  (Decart's glass-to-glass median)`,
+      `first frame ${g?.ttffMs?.toFixed(0) ?? "…"} ms`,
+      "res/strength don't apply in this mode",
+      S.note,
+    ].join("\n");
+    return;
+  }
   S.fps = { shown: S.shown * 2, sent: S.sent * 2 }; S.shown = 0; S.sent = 0;
   const f = (k) => avg(S.srv[k] || []).toFixed(1).padStart(5);
   const e2e = avg(S.e2e), srvTotal = avg(S.srv.total || []);

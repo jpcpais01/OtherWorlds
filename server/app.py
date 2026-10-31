@@ -18,7 +18,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
-from aiohttp import WSMsgType, web
+from aiohttp import ClientSession, WSMsgType, web
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.codecs import h264, vpx
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
@@ -220,8 +220,22 @@ async def websocket(request):
 
 async def config(request):
     phone_ice, _ = ice_servers()
-    return web.json_response({"iceServers": phone_ice, "styles": list(STYLES), **restyler.state,
-                              "engine": restyler.engine.name})
+    return web.json_response({"iceServers": phone_ice, "styles": list(STYLES), "prompts": STYLES,
+                              **restyler.state, "engine": restyler.engine.name,
+                              "decart": bool(os.environ.get("DECART_API_KEY"))})
+
+
+async def decart_token(request):
+    """Mint a short-lived Decart client token so the API key never reaches the phone."""
+    key = os.environ.get("DECART_API_KEY")
+    if not key:
+        return web.Response(status=404, text="Set DECART_API_KEY on the server to use Decart mode.")
+    async with ClientSession() as s:
+        async with s.post("https://api.decart.ai/v1/client/tokens", headers={"x-api-key": key},
+                          json={"expiresIn": 300, "allowedModels": ["lucy-restyle-2"]}) as r:
+            if r.status != 200:
+                return web.Response(status=502, text=f"Decart token error {r.status}: {await r.text()}")
+            return web.json_response({"apiKey": (await r.json())["apiKey"]})
 
 
 async def index(request):
@@ -248,6 +262,7 @@ def main():
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
     app.router.add_get("/config", config)
+    app.router.add_post("/decart-token", decart_token)
     app.router.add_post("/offer", offer)
     app.router.add_get("/ws", websocket)
     app.router.add_static("/", CLIENT_DIR)
