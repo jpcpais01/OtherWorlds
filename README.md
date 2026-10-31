@@ -71,5 +71,9 @@ python server/app.py --backend fake
 - `CN_SCALE` (env, default 0.6) sets how strictly the output follows the
   camera's edges.
 - Style, strength and resolution changes apply on the next frame.
-- Next steps for speed: `torch.compile` / TensorRT on the UNet and ControlNet.
+- `COMPILE=1` (default in run.sh) compiles the UNet and ControlNet with CUDA
+  graphs: on an H100 the UNet went from ~43 ms to ~16 ms at 768px. Each new
+  resolution recompiles once (1-2 min pause). `COMPILE=0` skips it.
+- Measured on a RunPod H100 in France: 768px, 20 FPS, ~155 ms end to end.
+- Next steps for speed: TensorRT.
   For temporal stability: StreamDiffusionV2.
