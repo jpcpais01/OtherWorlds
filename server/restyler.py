@@ -227,8 +227,8 @@ class SDXLTurboEngine(_TorchEngine):
             # math; CUDA graphs ("reduce-overhead") remove most of it. Costs a
             # 1-3 min compile at startup and again for each new resolution.
             print("compiling UNet + ControlNet (1-3 min)...")
-            self.unet = torch.compile(self.unet, mode="reduce-overhead")
-            self.controlnet = torch.compile(self.controlnet, mode="reduce-overhead")
+            self.unet = torch.compile(self.unet, mode="reduce-overhead", dynamic=False)
+            self.controlnet = torch.compile(self.controlnet, mode="reduce-overhead", dynamic=False)
         self.prompt, self.res, self.strength = STYLES["ghibli"], 512, 0.5
         self.embeds, self.noise = {}, None
         self._encode_prompt(self.prompt)
