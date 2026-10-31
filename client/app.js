@@ -163,7 +163,9 @@ async function startWebSocket() {
   // per-frame time, so a long RTT doesn't cap FPS. More would only queue.
   onCameraFrame(() => {
     const perFrame = Math.max(avg(S.srv.total || []) - avg(S.srv.queue || []), 33);
-    const maxInflight = Math.min(8, Math.max(2, Math.ceil(S.rtt / perFrame) + 1));
+    // Use the measured round trip (minus GPU queueing, so this can't feed on itself).
+    const trip = Math.max(S.rtt, avg(S.e2e) - avg(S.srv.queue || []));
+    const maxInflight = Math.min(8, Math.max(2, Math.ceil(trip / perFrame) + 1));
     if (S.inflight >= maxInflight || ws.readyState !== 1) return;
     const id = drawCamera(false);
     if (id < 0) return;
@@ -275,6 +277,8 @@ setInterval(() => {
     `        encode${f("encode")} total ${f("total")}`,
   ];
   if (S.mode === "ws") lines.push(`phone   jpeg-enc ${avg(S.enc).toFixed(1)}  jpeg-dec ${avg(S.dec).toFixed(1)}`);
+  const gpu = Object.keys(S.srv).filter((k) => k.startsWith("gpu.")).map((k) => `${k.slice(4)} ${avg(S.srv[k]).toFixed(1)}`);
+  if (gpu.length) lines.push(`gpu     ${gpu.join("  ")}`);
   lines.push(`network+codec+buffers ≈ ${Math.max(0, e2e - srvTotal - clientMs).toFixed(0)} ms`);
   if (S.note) lines.push(S.note);
   hud.textContent = lines.join("\n");

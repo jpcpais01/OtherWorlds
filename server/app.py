@@ -115,7 +115,7 @@ class RestyledTrack(MediaStreamTrack):
         self.send_meta({
             "type": "frame", "id": frame_id, "fps": round(self.stats.fps, 1), "dropped": self.stats.dropped,
             "srv": {"queue": (t0 - arrived) * 1e3, "decode": (t1 - t0) * 1e3, **t,
-                    "gpu_wait": (t2 - t1) * 1e3 - sum(t.values()), "encode": (t3 - t2) * 1e3,
+                    "gpu_wait": (t2 - t1) * 1e3 - t["pre"] - t["infer"] - t["post"], "encode": (t3 - t2) * 1e3,
                     "total": (t3 - arrived) * 1e3},
         })
         return vf
@@ -200,7 +200,7 @@ async def websocket(request):
             meta = json.dumps({
                 "type": "frame", "id": frame_id, "fps": round(stats.fps, 1), "dropped": stats.dropped,
                 "srv": {"queue": (t0 - arrived) * 1e3, "decode": (t1 - t0) * 1e3, **t,
-                        "gpu_wait": (t2 - t1) * 1e3 - sum(t.values()), "encode": (t3 - t2) * 1e3,
+                        "gpu_wait": (t2 - t1) * 1e3 - t["pre"] - t["infer"] - t["post"], "encode": (t3 - t2) * 1e3,
                         "total": (t3 - arrived) * 1e3},
             }).encode()
             if not ws.closed:

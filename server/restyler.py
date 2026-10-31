@@ -94,7 +94,9 @@ class _TorchEngine:
         t2 = time.perf_counter()
         out = self._to_numpy(y)
         t3 = time.perf_counter()
-        return out, {"pre": (t1 - t0) * 1e3, "infer": (t2 - t1) * 1e3, "post": (t3 - t2) * 1e3}
+        timings = {"pre": (t1 - t0) * 1e3, "infer": (t2 - t1) * 1e3, "post": (t3 - t2) * 1e3}
+        # Engines may break "infer" down further (GPU-side, shown as "gpu" in the HUD).
+        return out, {**timings, **getattr(self, "split", {})}
 
 
 class StreamDiffusionEngine(_TorchEngine):
@@ -265,22 +267,31 @@ class SDXLTurboEngine(_TorchEngine):
         r = self.res
         cond = {"text_embeds": pooled,
                 "time_ids": torch.tensor([[r, r, 0, 0, r, r]], device=self.device, dtype=self.dtype)}
+        ev = [torch.cuda.Event(enable_timing=True) for _ in range(5)]
         with torch.no_grad():
+            ev[0].record()
             latents = self.vae.encode(x * 2 - 1).latents * self.vae.config.scaling_factor
             if self.noise is None or self.noise.shape != latents.shape:
                 g = torch.Generator(self.device).manual_seed(0)
                 self.noise = torch.randn(latents.shape, generator=g, device=self.device, dtype=self.dtype)
             x_t = a.sqrt() * latents + (1 - a).sqrt() * self.noise
+            ev[1].record()
             down, mid = self.controlnet(
                 x_t, t, encoder_hidden_states=pe, controlnet_cond=self.edges,
                 conditioning_scale=self.cn_scale, added_cond_kwargs=cond, return_dict=False,
             )
+            ev[2].record()
             eps = self.unet(
                 x_t, t, encoder_hidden_states=pe, added_cond_kwargs=cond,
                 down_block_additional_residuals=down, mid_block_additional_residual=mid, return_dict=False,
             )[0]
+            ev[3].record()
             x0 = (x_t - (1 - a).sqrt() * eps) / a.sqrt()
             y = self.vae.decode(x0 / self.vae.config.scaling_factor).sample
+            ev[4].record()
+        torch.cuda.synchronize()
+        self.split = {f"gpu.{k}": ev[i].elapsed_time(ev[i + 1])
+                      for i, k in enumerate(("vae_enc", "controlnet", "unet", "vae_dec"))}
         return y / 2 + 0.5
 
 
