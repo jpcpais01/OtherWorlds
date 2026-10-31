@@ -221,7 +221,8 @@ class SDXLTurboEngine(_TorchEngine):
         self.unet, self.vae = pipe.unet, pipe.vae
         self.alphas = pipe.scheduler.alphas_cumprod.to(device)
         self.cn_scale = float(os.environ.get("CN_SCALE", 0.6))  # how strictly to follow the edges
-        if os.environ.get("COMPILE") == "1":
+        self.compiled = os.environ.get("COMPILE") == "1"
+        if self.compiled:
             # At 512px the UNet is limited by per-kernel launch overhead, not
             # math; CUDA graphs ("reduce-overhead") remove most of it. Costs a
             # 1-3 min compile at startup and again for each new resolution.
@@ -283,15 +284,22 @@ class SDXLTurboEngine(_TorchEngine):
                 self.noise = torch.randn(latents.shape, generator=g, device=self.device, dtype=self.dtype)
             x_t = a.sqrt() * latents + (1 - a).sqrt() * self.noise
             ev[1].record()
+            if self.compiled:
+                torch.compiler.cudagraph_mark_step_begin()
             down, mid = self.controlnet(
                 x_t, t, encoder_hidden_states=pe, controlnet_cond=self.edges,
                 conditioning_scale=self.cn_scale, added_cond_kwargs=cond, return_dict=False,
             )
+            if self.compiled:
+                # CUDA-graph outputs live in reused buffers; copy before the next graph runs.
+                down, mid = [d.clone() for d in down], mid.clone()
             ev[2].record()
             eps = self.unet(
                 x_t, t, encoder_hidden_states=pe, added_cond_kwargs=cond,
                 down_block_additional_residuals=down, mid_block_additional_residual=mid, return_dict=False,
             )[0]
+            if self.compiled:
+                eps = eps.clone()
             ev[3].record()
             x0 = (x_t - (1 - a).sqrt() * eps) / a.sqrt()
             y = self.vae.decode(x0 / self.vae.config.scaling_factor).sample
