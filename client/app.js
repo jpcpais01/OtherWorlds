@@ -106,7 +106,17 @@ async function startWebRTC() {
     try { e.receiver.jitterBufferTarget = 0; e.receiver.playoutDelayHint = 0; } catch {}
     out.srcObject = new MediaStream([e.track]); out.play().catch(() => {});
   };
-  onCameraFrame(() => drawCamera(true));
+  // Send only a little faster than the GPU restyles. Extra frames are dropped
+  // on the server anyway, and on a TCP relay they queue up and add latency.
+  let lastDraw = 0;
+  onCameraFrame(() => {
+    const service = avg(S.srv.total || []) - avg(S.srv.queue || []);  // GPU ms per frame
+    const target = service > 0 ? Math.min(30, Math.max(5, 1200 / service)) : 30;
+    const now = performance.now();
+    if (now - lastDraw < 1000 / target - 4) return;
+    lastDraw = now;
+    drawCamera(true);
+  });
 
   let last = -1;
   const onOut = () => {
