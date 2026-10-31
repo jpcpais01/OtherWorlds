@@ -221,6 +221,13 @@ class SDXLTurboEngine(_TorchEngine):
         self.unet, self.vae = pipe.unet, pipe.vae
         self.alphas = pipe.scheduler.alphas_cumprod.to(device)
         self.cn_scale = float(os.environ.get("CN_SCALE", 0.6))  # how strictly to follow the edges
+        if os.environ.get("COMPILE") == "1":
+            # At 512px the UNet is limited by per-kernel launch overhead, not
+            # math; CUDA graphs ("reduce-overhead") remove most of it. Costs a
+            # 1-3 min compile at startup and again for each new resolution.
+            print("compiling UNet + ControlNet (1-3 min)...")
+            self.unet = torch.compile(self.unet, mode="reduce-overhead")
+            self.controlnet = torch.compile(self.controlnet, mode="reduce-overhead")
         self.prompt, self.res, self.strength = STYLES["ghibli"], 512, 0.5
         self.embeds, self.noise = {}, None
         self._encode_prompt(self.prompt)

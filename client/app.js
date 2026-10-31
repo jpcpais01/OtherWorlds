@@ -165,7 +165,9 @@ async function startWebSocket() {
     const perFrame = Math.max(avg(S.srv.total || []) - avg(S.srv.queue || []), 33);
     // Use the measured round trip (minus GPU queueing, so this can't feed on itself).
     const trip = Math.max(S.rtt, avg(S.e2e) - avg(S.srv.queue || []));
-    const maxInflight = Math.min(8, Math.max(2, Math.ceil(trip / perFrame) + 1));
+    // No "+1": one extra frame keeps the GPU 100% busy but makes every frame
+    // wait a full GPU slot in the queue. For AR, latency beats the last few FPS.
+    const maxInflight = Math.min(8, Math.max(2, Math.ceil(trip / perFrame)));
     if (S.inflight >= maxInflight || ws.readyState !== 1) return;
     const id = drawCamera(false);
     if (id < 0) return;
