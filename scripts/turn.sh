@@ -5,9 +5,9 @@
 # Needs "3478" in the pod's "Expose TCP Ports" and a public IP.
 set -euo pipefail
 if [ -z "${RUNPOD_TCP_PORT_3478:-}" ]; then
-  echo "TCP port 3478 isn't exposed on this pod; WebSocket mode will be used instead."; exit 1
+  echo "off (TCP port 3478 not exposed; WebSocket mode still works)"; exit 1
 fi
-command -v turnserver >/dev/null || { apt-get update -qq && apt-get install -y -qq coturn; }
+command -v turnserver >/dev/null || { apt-get update -qq && apt-get install -y -qq coturn; } >/dev/null 2>&1
 [ -f /workspace/.turn_pass ] || head -c 12 /dev/urandom | base64 | tr -d '/+=' > /workspace/.turn_pass
 IP=$(hostname -I | awk '{print $1}')
 cat > /workspace/turnserver.conf <<CONF
@@ -25,6 +25,6 @@ no-cli
 log-file=/workspace/turn.log
 CONF
 pkill turnserver 2>/dev/null || true
-turnserver -c /workspace/turnserver.conf -o
-echo "TURN running: phone will use turn:${RUNPOD_PUBLIC_IP}:${RUNPOD_TCP_PORT_3478}?transport=tcp"
+turnserver -c /workspace/turnserver.conf -o >/dev/null 2>&1
+echo "on (${RUNPOD_PUBLIC_IP}:${RUNPOD_TCP_PORT_3478}, TCP)"
 

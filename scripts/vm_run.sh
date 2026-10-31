@@ -10,5 +10,5 @@ for _ in $(seq 30); do
   URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/tunnel.log | head -1 || true)
   [ -n "$URL" ] && break; sleep 1
 done
-echo; echo "=== Open on your phone: ${URL:-see /tmp/tunnel.log} ==="; echo
+export PUBLIC_URL=${URL:-"(tunnel link not found yet, see /tmp/tunnel.log)"}  # shown when the server is ready
 exec bash scripts/run.sh "$@"

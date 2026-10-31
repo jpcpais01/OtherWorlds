@@ -12,6 +12,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
+def step(msg):
+    """One line of the startup checklist in the terminal."""
+    print(f"▸ {msg}", flush=True)
+
+
 STYLES = {
     "ghibli": "studio ghibli anime illustration, hand-drawn, soft watercolor, "
               "lush pastel colors, whimsical, by hayao miyazaki",
@@ -132,6 +137,7 @@ class StreamDiffusionEngine(_TorchEngine):
         )
         self.stream.vae = self.taesd
         self.stream.prepare(self.prompt, num_inference_steps=50, guidance_scale=0)
+        step("Warming up")
         warm = np.zeros((self.res, self.res, 3), np.uint8)
         for _ in range(3):
             self.process(warm)
@@ -208,11 +214,14 @@ class SDXLTurboEngine(_TorchEngine):
                  depth_estimator="depth-anything/Depth-Anything-V2-Small-hf"):
         import torch
         from diffusers import AutoencoderTiny, ControlNetModel, StableDiffusionXLPipeline
+        from diffusers.utils.logging import disable_progress_bar
         from transformers import AutoModelForDepthEstimation, CLIPImageProcessor, CLIPVisionModelWithProjection
 
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
         device, dtype = torch.device("cuda"), torch.float16
+        step("Loading AI models (the first start downloads ~12 GB)")
+        disable_progress_bar()
         pipe = StableDiffusionXLPipeline.from_pretrained(
             model, torch_dtype=dtype, variant="fp16",
             vae=AutoencoderTiny.from_pretrained(vae, torch_dtype=dtype),
@@ -241,14 +250,18 @@ class SDXLTurboEngine(_TorchEngine):
             # At 512px the UNet is limited by per-kernel launch overhead, not
             # math; CUDA graphs ("reduce-overhead") remove most of it. Costs a
             # 1-3 min compile at startup and again for each new resolution.
-            print("compiling UNet + ControlNets (1-3 min)...")
             self.unet = torch.compile(self.unet, mode="reduce-overhead", dynamic=False)
             self.controlnets = [torch.compile(c, mode="reduce-overhead", dynamic=False) for c in self.controlnets]
         self.prompt, self.res, self.strength = STYLES["ghibli"], 512, 0.7
         self.embeds, self.image_embeds, self.user_image, self.noise = {}, {}, None, None
+        self.compiled_res = {self.res}
+        # With COMPILE=1 the first frames below also trigger the compile.
+        step("Compiling for speed and painting style pictures (2-4 min)" if self.compiled
+             else "Painting style pictures")
         for p in STYLES.values():  # paint the built-in style references up front
             self._encode_prompt(p)
             self._style_embeds(p)
+        step("Warming up")
         warm = np.zeros((self.res, self.res, 3), np.uint8)
         for _ in range(3):
             self.process(warm)
@@ -317,6 +330,9 @@ class SDXLTurboEngine(_TorchEngine):
             self.prompt = prompt
         if res and res != self.res:
             self.res, self.noise = res, None
+            if self.compiled and res not in self.compiled_res:
+                self.compiled_res.add(res)
+                step(f"Compiling for {res}px (1-2 min, once per resolution; the picture pauses meanwhile)")
         if strength is not None:
             self.strength = strength
 
@@ -397,11 +413,12 @@ def make_engine(backend):
         return FakeEngine()
     if backend in ("auto", "sdxl"):
         return SDXLTurboEngine()
+    step(f"Loading AI model ({backend})")
     if backend == "streamdiffusion":
         try:
             return StreamDiffusionEngine()
         except ImportError as e:
-            print(f"StreamDiffusion unavailable ({e}); falling back to diffusers")
+            step(f"StreamDiffusion unavailable ({e}); using diffusers instead")
     return DiffusersEngine()
 
 
@@ -412,7 +429,6 @@ class Restyler:
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.engine = self.pool.submit(make_engine, backend).result()
         self.state = {"style": "ghibli", "prompt": STYLES["ghibli"], "res": 512, "strength": 0.7}
-        print(f"engine ready: {self.engine.name}")
 
     async def run(self, loop, fn, *args):
         return await loop.run_in_executor(self.pool, fn, *args)

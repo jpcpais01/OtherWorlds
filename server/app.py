@@ -14,6 +14,14 @@ import json
 import os
 import struct
 import time
+import warnings
+
+# Keep the terminal to our own step-by-step lines: hide library deprecation
+# warnings, download bars and torch.compile chatter. Real errors still show.
+warnings.filterwarnings("ignore")
+for k, v in {"DIFFUSERS_VERBOSITY": "error", "TRANSFORMERS_VERBOSITY": "error",
+             "HF_HUB_DISABLE_PROGRESS_BARS": "1", "TORCH_LOGS": "-dynamo,-inductor,-dynamic,-aot"}.items():
+    os.environ.setdefault(k, v)
 from fractions import Fraction
 from pathlib import Path
 
@@ -161,7 +169,8 @@ async def offer(request):
 
     @pc.on("connectionstatechange")
     async def on_state():
-        print("webrtc:", pc.connectionState)
+        if pc.connectionState in ("connected", "failed", "closed"):
+            print(f"  phone {'connected' if pc.connectionState == 'connected' else 'disconnected'} (WebRTC)", flush=True)
         if pc.connectionState in ("failed", "closed"):
             await pc.close()
             pcs.discard(pc)
@@ -176,6 +185,7 @@ async def websocket(request):
     Server -> phone: uint32 id + uint32 meta length + meta JSON + JPEG."""
     ws = web.WebSocketResponse(max_msg_size=8 * 1024 * 1024)
     await ws.prepare(request)
+    print("  phone connected (WebSocket)", flush=True)
     loop = asyncio.get_running_loop()
     # FIFO: the phone caps how many frames it has in flight, so this stays short
     # and every frame gets an answer (the phone counts replies to pace itself).
@@ -215,6 +225,7 @@ async def websocket(request):
                 await handle_control(json.loads(m.data), reply)
     finally:
         task.cancel()
+        print("  phone disconnected (WebSocket)", flush=True)
     return ws
 
 
@@ -266,9 +277,18 @@ def main():
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()
-    print(f"loading {args.backend} engine (first run downloads the model weights, ~3-8 GB)...")
+    started = time.perf_counter()
     restyler = Restyler(args.backend)
-    print("phone ICE servers:", [s["urls"] for s in ice_servers()[0]])
+    if os.environ.get("RUNPOD_POD_ID"):
+        url = f"https://{os.environ['RUNPOD_POD_ID']}-{args.port}.proxy.runpod.net"
+    else:
+        url = os.environ.get("PUBLIC_URL") or f"http://localhost:{args.port}"
+    mins, secs = divmod(int(time.perf_counter() - started), 60)
+    line = "=" * 64
+    print(f"\n{line}\n  READY ({restyler.engine.name}, started in {mins}m {secs:02d}s)\n\n"
+          f"  Open on your phone:  {url}\n\n"
+          f"  Stop the server: Ctrl+C. Billing only stops when you\n"
+          f"  Terminate the pod (RunPod) or Destroy the Droplet.\n{line}\n", flush=True)
 
     app = web.Application(client_max_size=20 * 2**20)
     app.on_shutdown.append(on_shutdown)
@@ -279,7 +299,7 @@ def main():
     app.router.add_post("/style-image", style_image)
     app.router.add_get("/ws", websocket)
     app.router.add_static("/", CLIENT_DIR)
-    web.run_app(app, host=args.host, port=args.port)
+    web.run_app(app, host=args.host, port=args.port, print=None)
 
 
 if __name__ == "__main__":
