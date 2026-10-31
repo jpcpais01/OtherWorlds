@@ -92,13 +92,20 @@ function recordShown(id) {
 
 // ---- transport 1: WebRTC ----
 async function startWebRTC() {
-  const pc = (S.pc = new RTCPeerConnection({ iceServers: S.cfg.iceServers }));
+  // With a TURN relay configured, only relayed paths can work on RunPod (no
+  // inbound UDP), so skip the doomed direct candidates and connect faster.
+  const hasTurn = S.cfg.iceServers.some((s) => String(s.urls).startsWith("turn"));
+  const pc = (S.pc = new RTCPeerConnection({ iceServers: S.cfg.iceServers, iceTransportPolicy: hasTurn ? "relay" : "all" }));
   S.dc = pc.createDataChannel("ctrl");
   S.dc.onmessage = (e) => onServerMessage(JSON.parse(e.data));
   S.dc.onopen = () => sendConfig({ style: currentStyle() });
   // One sendrecv video transceiver: camera up, restyled video back down.
   pc.addTrack(capture.captureStream(30).getVideoTracks()[0]);
-  pc.ontrack = (e) => { out.srcObject = new MediaStream([e.track]); out.play().catch(() => {}); };
+  pc.ontrack = (e) => {
+    // Ask the browser not to buffer frames for smoothness: we want them now.
+    try { e.receiver.jitterBufferTarget = 0; e.receiver.playoutDelayHint = 0; } catch {}
+    out.srcObject = new MediaStream([e.track]); out.play().catch(() => {});
+  };
   onCameraFrame(() => drawCamera(true));
 
   let last = -1;
@@ -142,9 +149,12 @@ async function startWebSocket() {
     recordShown(id);
   };
   sendConfig({ style: currentStyle() });
-  // Keep at most 2 frames in flight: enough to hide RTT, not enough to queue.
+  // Frames in flight: enough to cover the network round trip at the GPU's
+  // per-frame time, so a long RTT doesn't cap FPS. More would only queue.
   onCameraFrame(() => {
-    if (S.inflight >= 2 || ws.readyState !== 1) return;
+    const perFrame = Math.max(avg(S.srv.total || []) - avg(S.srv.queue || []), 33);
+    const maxInflight = Math.min(8, Math.max(2, Math.ceil(S.rtt / perFrame) + 1));
+    if (S.inflight >= maxInflight || ws.readyState !== 1) return;
     const id = drawCamera(false);
     if (id < 0) return;
     S.inflight++;

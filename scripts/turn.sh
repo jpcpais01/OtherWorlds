@@ -12,7 +12,6 @@ command -v turnserver >/dev/null || { apt-get update -qq && apt-get install -y -
 IP=$(hostname -I | awk '{print $1}')
 cat > /workspace/turnserver.conf <<CONF
 listening-port=3478
-listening-ip=$IP
 relay-ip=$IP
 min-port=49160
 max-port=49200
@@ -28,4 +27,4 @@ CONF
 pkill turnserver 2>/dev/null || true
 turnserver -c /workspace/turnserver.conf -o
 echo "TURN running: phone will use turn:${RUNPOD_PUBLIC_IP}:${RUNPOD_TCP_PORT_3478}?transport=tcp"
-echo "Restart scripts/run.sh so the server picks it up."
+

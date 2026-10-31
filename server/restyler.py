@@ -6,6 +6,7 @@
 process() always returns a res x res image. Both calls must run on the same
 worker thread (see Restyler), because the GPU state is not thread safe.
 """
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -183,15 +184,115 @@ class DiffusersEngine(_TorchEngine):
             ).images
 
 
+class SDXLTurboEngine(_TorchEngine):
+    """SDXL-Turbo, one denoising step, guided by a Canny-edge ControlNet.
+
+    A hand-written single-step loop (no diffusers pipeline) so nothing but the
+    networks runs per frame. The ControlNet keeps the room's shapes in place,
+    which lets strength go high (strong style) without losing the scene, and
+    the fixed noise tensor keeps frames from flickering more than they must.
+    """
+
+    name = "sdxl-turbo"
+    # SDXL-Turbo was distilled for these timesteps (4-step schedule).
+    TIMESTEPS = (249, 499, 749, 999)
+
+    def __init__(self, model="stabilityai/sdxl-turbo",
+                 controlnet="diffusers/controlnet-canny-sdxl-1.0-small", vae="madebyollin/taesdxl"):
+        import torch
+        from diffusers import AutoencoderTiny, ControlNetModel, StableDiffusionXLPipeline
+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        device, dtype = torch.device("cuda"), torch.float16
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            model, torch_dtype=dtype, variant="fp16",
+            vae=AutoencoderTiny.from_pretrained(vae, torch_dtype=dtype),
+        ).to(device)
+        cn = ControlNetModel.from_pretrained(controlnet, torch_dtype=dtype).to(device)
+        self._setup(pipe, cn, device, dtype)
+
+    def _setup(self, pipe, controlnet, device, dtype):
+        import torch
+
+        self.pipe, self.controlnet, self.device, self.dtype = pipe, controlnet, device, dtype
+        self.unet, self.vae = pipe.unet, pipe.vae
+        self.alphas = pipe.scheduler.alphas_cumprod.to(device)
+        self.cn_scale = float(os.environ.get("CN_SCALE", 0.6))  # how strictly to follow the edges
+        self.prompt, self.res, self.strength = STYLES["ghibli"], 512, 0.5
+        self.embeds, self.noise = {}, None
+        self._encode_prompt(self.prompt)
+        warm = np.zeros((self.res, self.res, 3), np.uint8)
+        for _ in range(3):
+            self.process(warm)
+        torch.cuda.synchronize()
+
+    def _encode_prompt(self, prompt):
+        import torch
+
+        if prompt not in self.embeds:
+            with torch.no_grad():
+                pe, _, pooled, _ = self.pipe.encode_prompt(prompt, device=self.device, do_classifier_free_guidance=False)
+            self.embeds[prompt] = (pe, pooled)
+        return self.embeds[prompt]
+
+    def configure(self, prompt=None, res=None, strength=None):
+        if prompt:
+            self._encode_prompt(prompt)
+            self.prompt = prompt
+        if res and res != self.res:
+            self.res, self.noise = res, None
+        if strength is not None:
+            self.strength = strength
+
+    def _to_tensor(self, img):
+        import cv2
+        import torch
+
+        x = super()._to_tensor(img)
+        # Canny edges on the CPU from the (already resized) frame: ~1 ms at 512px.
+        small = (x[0].permute(1, 2, 0).float() * 255).byte().cpu().numpy()
+        edges = cv2.Canny(cv2.cvtColor(small, cv2.COLOR_RGB2GRAY), 100, 200)
+        self.edges = torch.from_numpy(edges).to(self.device).to(self.dtype).div(255).expand(1, 3, -1, -1)
+        return x
+
+    def _infer(self, x):
+        import torch
+
+        t = min(self.TIMESTEPS, key=lambda v: abs(v - self.strength * 1000))
+        a = self.alphas[t].to(self.dtype)
+        pe, pooled = self.embeds[self.prompt]
+        r = self.res
+        cond = {"text_embeds": pooled,
+                "time_ids": torch.tensor([[r, r, 0, 0, r, r]], device=self.device, dtype=self.dtype)}
+        with torch.no_grad():
+            latents = self.vae.encode(x * 2 - 1).latents * self.vae.config.scaling_factor
+            if self.noise is None or self.noise.shape != latents.shape:
+                g = torch.Generator(self.device).manual_seed(0)
+                self.noise = torch.randn(latents.shape, generator=g, device=self.device, dtype=self.dtype)
+            x_t = a.sqrt() * latents + (1 - a).sqrt() * self.noise
+            down, mid = self.controlnet(
+                x_t, t, encoder_hidden_states=pe, controlnet_cond=self.edges,
+                conditioning_scale=self.cn_scale, added_cond_kwargs=cond, return_dict=False,
+            )
+            eps = self.unet(
+                x_t, t, encoder_hidden_states=pe, added_cond_kwargs=cond,
+                down_block_additional_residuals=down, mid_block_additional_residual=mid, return_dict=False,
+            )[0]
+            x0 = (x_t - (1 - a).sqrt() * eps) / a.sqrt()
+            y = self.vae.decode(x0 / self.vae.config.scaling_factor).sample
+        return y / 2 + 0.5
+
+
 def make_engine(backend):
     if backend == "fake":
         return FakeEngine()
-    if backend in ("auto", "streamdiffusion"):
+    if backend in ("auto", "sdxl"):
+        return SDXLTurboEngine()
+    if backend == "streamdiffusion":
         try:
             return StreamDiffusionEngine()
         except ImportError as e:
-            if backend == "streamdiffusion":
-                raise
             print(f"StreamDiffusion unavailable ({e}); falling back to diffusers")
     return DiffusersEngine()
 

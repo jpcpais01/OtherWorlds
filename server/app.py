@@ -177,7 +177,9 @@ async def websocket(request):
     ws = web.WebSocketResponse(max_msg_size=8 * 1024 * 1024)
     await ws.prepare(request)
     loop = asyncio.get_running_loop()
-    slot, fresh, stats = {}, asyncio.Event(), Stats()
+    # FIFO: the phone caps how many frames it has in flight, so this stays short
+    # and every frame gets an answer (the phone counts replies to pace itself).
+    queue, stats = asyncio.Queue(), Stats()
 
     def reply(m):
         if not ws.closed:
@@ -185,9 +187,7 @@ async def websocket(request):
 
     async def worker():
         while not ws.closed:
-            await fresh.wait()
-            fresh.clear()
-            frame_id, jpeg, arrived = slot.pop("frame")
+            frame_id, jpeg, arrived = await queue.get()
             t0 = time.perf_counter()
             img = np.asarray(Image.open(io.BytesIO(jpeg)).convert("RGB"))
             t1 = time.perf_counter()
@@ -210,10 +210,7 @@ async def websocket(request):
     try:
         async for m in ws:
             if m.type == WSMsgType.BINARY:
-                if "frame" in slot:
-                    stats.dropped += 1
-                slot["frame"] = (struct.unpack_from("<I", m.data)[0], m.data[4:], time.perf_counter())
-                fresh.set()
+                queue.put_nowait((struct.unpack_from("<I", m.data)[0], m.data[4:], time.perf_counter()))
             elif m.type == WSMsgType.TEXT:
                 await handle_control(json.loads(m.data), reply)
     finally:
@@ -238,11 +235,12 @@ async def on_shutdown(app):
 def main():
     global restyler
     ap = argparse.ArgumentParser()
-    ap.add_argument("--backend", default="auto", choices=["auto", "streamdiffusion", "diffusers", "fake"])
+    ap.add_argument("--backend", default="auto", choices=["auto", "sdxl", "streamdiffusion", "diffusers", "fake"],
+                    help="auto = sdxl (SDXL-Turbo + ControlNet); streamdiffusion = lighter sd-turbo")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()
-    print(f"loading {args.backend} engine (first run downloads ~2.5 GB of weights)...")
+    print(f"loading {args.backend} engine (first run downloads the model weights, ~3-8 GB)...")
     restyler = Restyler(args.backend)
     print("phone ICE servers:", [s["urls"] for s in ice_servers()[0]])
 

@@ -8,5 +8,6 @@ transformers==4.44.2
 accelerate==0.34.2
 numpy<2
 pillow
+opencv-python-headless<4.12  # Canny edges for the ControlNet; 4.12+ needs numpy 2
 aiohttp>=3.9
 aiortc>=1.9

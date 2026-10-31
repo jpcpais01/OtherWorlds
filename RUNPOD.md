@@ -2,11 +2,13 @@
 
 Steps marked **💰** cost money. Everything else is free.
 
-What you'll pay, roughly: an RTX 4090 pod is about **$0.35–0.70 per hour**
+What you'll pay, roughly: an H100 pod (for the default SDXL engine) is about
+**$2–3 per hour**; an L40 or RTX 4090 with the lighter `streamdiffusion`
+engine is about **$0.35–0.90 per hour**
 while it exists and is running (RunPod shows the exact price before you
 deploy). Its disks cost a few cents per GB per month, **and keep costing even
-when the pod is stopped**, until you terminate it. A one-hour test session is
-typically under $1.
+when the pod is stopped**, until you terminate it. A one-hour H100 test session is
+about $3.
 
 ---
 
@@ -27,18 +29,20 @@ Go to **Pods → Deploy**.
 - Choose **Secure Cloud** (it gives the pod a public IP, which the optional
   WebRTC relay in step 8 needs. Community Cloud is cheaper and fine if you
   only use WebSocket mode).
-- Choose **RTX 4090** (good fit). RTX 3090, A5000 or L40S also work.
-  Avoid RTX 5090 / B200: they need a newer PyTorch than this setup pins.
+- Choose **H100** (NVL, SXM or PCIe). For the lighter engine, an L40, RTX
+  4090 or 3090 is enough. Avoid RTX 5090 / PRO 6000 / B200: they need a newer
+  PyTorch than this setup pins. Prefer a datacenter near you: the network
+  round trip, not the GPU, is usually what limits FPS.
 
 ## 4. Configure the pod (free)
 
 - **Template:** `RunPod Pytorch 2.4.0`
   (`runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`).
 - Click **Edit Template**:
-  - Container Disk: **20 GB**
-  - Volume Disk: **20 GB** (mounted at `/workspace`, holds the model weights)
+  - Container Disk: **50 GB** (the SDXL weights are ~8 GB)
+  - No volume needed
   - Expose HTTP Ports: **8080** (keep 8888 if listed)
-  - Expose TCP Ports: **22, 3478** (3478 is for the optional TURN relay)
+  - Expose TCP Ports: **22, 3478** (3478 carries WebRTC through a TURN relay)
 - Do **not** attach a Network Volume (those bill separately and outlive the pod).
 - Pricing: **On-Demand**. (Spot is cheaper but can be shut off mid-session.)
 
@@ -56,11 +60,12 @@ In the pod, click **Connect → Start Web Terminal → Connect to Web Terminal**
 cd /workspace
 git clone -b claude/project-thread-izhm9c https://github.com/jpcpais01/OtherWorlds
 cd OtherWorlds
-bash scripts/setup.sh      # ~3 min, ends with "setup OK on NVIDIA GeForce RTX 4090"
-bash scripts/run.sh        # first run downloads ~2.5 GB of weights
+bash scripts/setup.sh      # ~3 min, ends with "setup OK on NVIDIA H100 ..."
+bash scripts/run.sh        # first run downloads ~8 GB of weights
+                           # (lighter engine: bash scripts/run.sh --backend streamdiffusion)
 ```
 
-Wait for `engine ready: streamdiffusion` and `Running on http://0.0.0.0:8080`.
+Wait for `engine ready: sdxl-turbo` and `Running on http://0.0.0.0:8080`.
 Leave this terminal open.
 
 ## 7. Open it on your phone
@@ -73,21 +78,13 @@ With **Link: auto** it tries WebRTC for 10 seconds, then falls back to
 WebSocket, which always works through RunPod's proxy. The HUD's first line
 says which one is in use.
 
-## 8. Optional: make WebRTC work (free, same pod)
+## 8. WebRTC (automatic if TCP 3478 is exposed)
 
-RunPod pods don't accept inbound UDP, so WebRTC needs a TURN relay. This runs
-one on the pod, reached over the TCP port you exposed:
-
-```bash
-# in a second web terminal
-cd /workspace/OtherWorlds && bash scripts/turn.sh
-```
-
-Then stop the server in the first terminal (Ctrl+C) and run
-`bash scripts/run.sh` again. It should print a `turn:<ip>:<port>?transport=tcp`
-line under `phone ICE servers`. Reload the phone page and pick **Link: WebRTC**
-to compare against WebSocket. (TURN over TCP can lose to plain WebSocket on a
-bad network; the HUD will tell you.)
+RunPod pods don't accept inbound UDP, so WebRTC goes through a TURN relay
+that `run.sh` starts on the pod. Check that it printed a
+`turn:<ip>:<port>?transport=tcp` line under `phone ICE servers`. If not, the
+pod has no public IP or port 3478 isn't exposed, and WebSocket is used.
+Compare the two with the **Link** selector; the HUD shows the latency of each.
 
 ## 9. Stop billing when you're done
 
