@@ -53,7 +53,7 @@ bash scripts/vm_run.sh
 
 It prints `=== Open on your phone: https://….trycloudflare.com ===` (a free
 HTTPS tunnel; phones only allow the camera on HTTPS pages). The first start
-downloads ~8 GB of model weights; wait for `engine ready: sdxl-turbo`.
+downloads ~12 GB of model weights; wait for `engine ready: sdxl-turbo`.
 
 Open the link on your phone, set **Link → WebRTC**, and tap **Start**. Here
 WebRTC connects directly, so it should beat WebSocket; compare both.

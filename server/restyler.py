@@ -187,22 +187,28 @@ class DiffusersEngine(_TorchEngine):
 
 
 class SDXLTurboEngine(_TorchEngine):
-    """SDXL-Turbo, one denoising step, guided by a Canny-edge ControlNet.
+    """SDXL-Turbo, one denoising step, steered three ways at once:
 
-    A hand-written single-step loop (no diffusers pipeline) so nothing but the
-    networks runs per frame. The ControlNet keeps the room's shapes in place,
-    which lets strength go high (strong style) without losing the scene, and
-    the fixed noise tensor keeps frames from flickering more than they must.
+    - Canny-edge and depth ControlNets keep the scene's outlines and 3D layout,
+      so strength can go high (strong style) without losing the room.
+    - An IP-Adapter pulls every frame toward a style reference image: one the
+      user uploads, or else one this engine paints from the style prompt.
+    - A fixed noise tensor keeps frames from flickering more than they must.
+
+    A hand-written loop (no diffusers pipeline) so only the networks run per frame.
     """
 
     name = "sdxl-turbo"
     # SDXL-Turbo was distilled for these timesteps (4-step schedule).
     TIMESTEPS = (249, 499, 749, 999)
 
-    def __init__(self, model="stabilityai/sdxl-turbo",
-                 controlnet="diffusers/controlnet-canny-sdxl-1.0-small", vae="madebyollin/taesdxl"):
+    def __init__(self, model="stabilityai/sdxl-turbo", vae="madebyollin/taesdxl",
+                 canny="diffusers/controlnet-canny-sdxl-1.0-small",
+                 depth="diffusers/controlnet-depth-sdxl-1.0-small",
+                 depth_estimator="depth-anything/Depth-Anything-V2-Small-hf"):
         import torch
         from diffusers import AutoencoderTiny, ControlNetModel, StableDiffusionXLPipeline
+        from transformers import AutoModelForDepthEstimation, CLIPImageProcessor, CLIPVisionModelWithProjection
 
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
@@ -210,28 +216,39 @@ class SDXLTurboEngine(_TorchEngine):
         pipe = StableDiffusionXLPipeline.from_pretrained(
             model, torch_dtype=dtype, variant="fp16",
             vae=AutoencoderTiny.from_pretrained(vae, torch_dtype=dtype),
+            # ViT-H image encoder: half the size of the default bigG one.
+            image_encoder=CLIPVisionModelWithProjection.from_pretrained(
+                "h94/IP-Adapter", subfolder="models/image_encoder", torch_dtype=dtype),
+            feature_extractor=CLIPImageProcessor(),
         ).to(device)
-        cn = ControlNetModel.from_pretrained(controlnet, torch_dtype=dtype).to(device)
-        self._setup(pipe, cn, device, dtype)
+        pipe.load_ip_adapter("h94/IP-Adapter", subfolder="sdxl_models", weight_name="ip-adapter_sdxl_vit-h.safetensors")
+        cns = [ControlNetModel.from_pretrained(m, torch_dtype=dtype).to(device) for m in (canny, depth)]
+        depth_model = AutoModelForDepthEstimation.from_pretrained(depth_estimator, torch_dtype=dtype).to(device)
+        self._setup(pipe, cns, depth_model, device, dtype)
 
-    def _setup(self, pipe, controlnet, device, dtype):
+    def _setup(self, pipe, controlnets, depth_model, device, dtype):
         import torch
 
-        self.pipe, self.controlnet, self.device, self.dtype = pipe, controlnet, device, dtype
-        self.unet, self.vae = pipe.unet, pipe.vae
+        self.pipe, self.device, self.dtype = pipe, device, dtype
+        self.unet, self.vae, self.depth_model = pipe.unet, pipe.vae, depth_model
+        self.controlnets = list(controlnets)
         self.alphas = pipe.scheduler.alphas_cumprod.to(device)
-        self.cn_scale = float(os.environ.get("CN_SCALE", 0.6))  # how strictly to follow the edges
+        # How strictly to follow the camera's edges / depth, and the style image.
+        self.cn_scales = (float(os.environ.get("CN_SCALE", 0.4)), float(os.environ.get("DEPTH_SCALE", 0.5)))
+        pipe.set_ip_adapter_scale(float(os.environ.get("IP_SCALE", 0.6)))
         self.compiled = os.environ.get("COMPILE") == "1"
         if self.compiled:
             # At 512px the UNet is limited by per-kernel launch overhead, not
             # math; CUDA graphs ("reduce-overhead") remove most of it. Costs a
             # 1-3 min compile at startup and again for each new resolution.
-            print("compiling UNet + ControlNet (1-3 min)...")
+            print("compiling UNet + ControlNets (1-3 min)...")
             self.unet = torch.compile(self.unet, mode="reduce-overhead", dynamic=False)
-            self.controlnet = torch.compile(self.controlnet, mode="reduce-overhead", dynamic=False)
-        self.prompt, self.res, self.strength = STYLES["ghibli"], 512, 0.5
-        self.embeds, self.noise = {}, None
-        self._encode_prompt(self.prompt)
+            self.controlnets = [torch.compile(c, mode="reduce-overhead", dynamic=False) for c in self.controlnets]
+        self.prompt, self.res, self.strength = STYLES["ghibli"], 512, 0.7
+        self.embeds, self.image_embeds, self.user_image, self.noise = {}, {}, None, None
+        for p in STYLES.values():  # paint the built-in style references up front
+            self._encode_prompt(p)
+            self._style_embeds(p)
         warm = np.zeros((self.res, self.res, 3), np.uint8)
         for _ in range(3):
             self.process(warm)
@@ -246,9 +263,57 @@ class SDXLTurboEngine(_TorchEngine):
             self.embeds[prompt] = (pe, pooled)
         return self.embeds[prompt]
 
+    def _style_embeds(self, prompt):
+        """IP-Adapter embedding: the uploaded image, else a reference painted from the prompt."""
+        import torch
+
+        if self.user_image is not None:
+            return self.user_image
+        if prompt not in self.image_embeds:
+            with torch.no_grad():
+                ref = self._paint(prompt)
+                self.image_embeds[prompt] = self.pipe.encode_image(ref, self.device, 1)[0]
+        return self.image_embeds[prompt]
+
+    def _paint(self, prompt):
+        """Text-to-image in one step (SDXL-Turbo's native mode), for style references."""
+        import torch
+        from PIL import Image
+
+        g = torch.Generator(self.device).manual_seed(1)
+        r = self.res
+        noise = torch.randn((1, 4, r // 8, r // 8), generator=g, device=self.device, dtype=self.dtype)
+        zero_img = torch.zeros((1, 3, r, r), device=self.device, dtype=self.dtype)
+        self._ev = [torch.cuda.Event(enable_timing=True) for _ in range(5)]
+        # Through the same compiled graphs as frames (pure noise, no control, a
+        # neutral style embedding), so painting never triggers a recompile.
+        y = self._denoise(noise, 999, prompt, (zero_img, zero_img), control=0.0,
+                          image_embeds=self._neutral_embeds())
+        y = (y / 2 + 0.5).clamp(0, 1)[0].permute(1, 2, 0).float().mul(255).byte().cpu().numpy()
+        return Image.fromarray(y)
+
+    def _neutral_embeds(self):
+        import torch
+
+        if not hasattr(self, "_neutral"):
+            dim = self.pipe.image_encoder.config.projection_dim
+            self._neutral = torch.zeros((1, dim), device=self.device, dtype=self.dtype)
+        return self._neutral
+
+    def set_style_image(self, image):
+        """PIL image from the phone, or None to go back to prompt-painted references."""
+        import torch
+
+        if image is None:
+            self.user_image = None
+        else:
+            with torch.no_grad():
+                self.user_image = self.pipe.encode_image(image.convert("RGB"), self.device, 1)[0]
+
     def configure(self, prompt=None, res=None, strength=None):
         if prompt:
             self._encode_prompt(prompt)
+            self._style_embeds(prompt)
             self.prompt = prompt
         if res and res != self.res:
             self.res, self.noise = res, None
@@ -258,24 +323,59 @@ class SDXLTurboEngine(_TorchEngine):
     def _to_tensor(self, img):
         import cv2
         import torch
+        import torch.nn.functional as F
 
         x = super()._to_tensor(img)
         # Canny edges on the CPU from the (already resized) frame: ~1 ms at 512px.
         small = (x[0].permute(1, 2, 0).float() * 255).byte().cpu().numpy()
         edges = cv2.Canny(cv2.cvtColor(small, cv2.COLOR_RGB2GRAY), 100, 200)
-        self.edges = torch.from_numpy(edges).to(self.device).to(self.dtype).div(255).expand(1, 3, -1, -1)
+        edges = torch.from_numpy(edges).to(self.device).to(self.dtype).div(255).expand(1, 3, -1, -1)
+        # Depth Anything V2 (small) on the GPU; near = bright, as the ControlNet expects.
+        mean = torch.tensor([0.485, 0.456, 0.406], device=self.device, dtype=self.dtype).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=self.device, dtype=self.dtype).view(1, 3, 1, 1)
+        with torch.no_grad():
+            d = self.depth_model(pixel_values=(F.interpolate(x, size=(518, 518), mode="bilinear") - mean) / std)
+        d = F.interpolate(d.predicted_depth[:, None], size=x.shape[-2:], mode="bilinear")
+        d = (d - d.amin()) / (d.amax() - d.amin() + 1e-6)
+        self.hints = (edges, d.expand(1, 3, -1, -1).to(self.dtype))
         return x
+
+    def _denoise(self, latents_t, t, prompt, hints, control, image_embeds):
+        """One SDXL-Turbo step: noisy latents at timestep t -> predicted clean latents."""
+        import torch
+
+        a = self.alphas[t].to(self.dtype)
+        pe, pooled = self.embeds[prompt]
+        r = latents_t.shape[-1] * 8
+        # Timestep as a tensor: a Python int would make torch.compile recompile per strength.
+        tt = torch.tensor([t], device=self.device)
+        cond = {"text_embeds": pooled,
+                "time_ids": torch.tensor([[r, r, 0, 0, r, r]], device=self.device, dtype=self.dtype)}
+        if self.compiled:
+            torch.compiler.cudagraph_mark_step_begin()
+        down, mid = None, None
+        for cn, hint, scale in zip(self.controlnets, hints, self.cn_scales):
+            d, m = cn(latents_t, tt, encoder_hidden_states=pe, controlnet_cond=hint,
+                      conditioning_scale=scale, added_cond_kwargs=cond, return_dict=False)
+            # Copy out of CUDA-graph buffers (also sums the two ControlNets).
+            d, m = [v * control for v in d], m * control
+            down = d if down is None else [u + v for u, v in zip(down, d)]
+            mid = m if mid is None else mid + m
+        self._ev[2].record()
+        eps = self.unet(
+            latents_t, tt, encoder_hidden_states=pe, added_cond_kwargs={**cond, "image_embeds": image_embeds},
+            down_block_additional_residuals=down, mid_block_additional_residual=mid, return_dict=False,
+        )[0].clone()
+        self._ev[3].record()
+        x0 = (latents_t - (1 - a).sqrt() * eps) / a.sqrt()
+        return self.vae.decode(x0 / self.vae.config.scaling_factor).sample
 
     def _infer(self, x):
         import torch
 
         t = min(self.TIMESTEPS, key=lambda v: abs(v - self.strength * 1000))
         a = self.alphas[t].to(self.dtype)
-        pe, pooled = self.embeds[self.prompt]
-        r = self.res
-        cond = {"text_embeds": pooled,
-                "time_ids": torch.tensor([[r, r, 0, 0, r, r]], device=self.device, dtype=self.dtype)}
-        ev = [torch.cuda.Event(enable_timing=True) for _ in range(5)]
+        self._ev = ev = [torch.cuda.Event(enable_timing=True) for _ in range(5)]
         with torch.no_grad():
             ev[0].record()
             latents = self.vae.encode(x * 2 - 1).latents * self.vae.config.scaling_factor
@@ -284,25 +384,7 @@ class SDXLTurboEngine(_TorchEngine):
                 self.noise = torch.randn(latents.shape, generator=g, device=self.device, dtype=self.dtype)
             x_t = a.sqrt() * latents + (1 - a).sqrt() * self.noise
             ev[1].record()
-            if self.compiled:
-                torch.compiler.cudagraph_mark_step_begin()
-            down, mid = self.controlnet(
-                x_t, t, encoder_hidden_states=pe, controlnet_cond=self.edges,
-                conditioning_scale=self.cn_scale, added_cond_kwargs=cond, return_dict=False,
-            )
-            if self.compiled:
-                # CUDA-graph outputs live in reused buffers; copy before the next graph runs.
-                down, mid = [d.clone() for d in down], mid.clone()
-            ev[2].record()
-            eps = self.unet(
-                x_t, t, encoder_hidden_states=pe, added_cond_kwargs=cond,
-                down_block_additional_residuals=down, mid_block_additional_residual=mid, return_dict=False,
-            )[0]
-            if self.compiled:
-                eps = eps.clone()
-            ev[3].record()
-            x0 = (x_t - (1 - a).sqrt() * eps) / a.sqrt()
-            y = self.vae.decode(x0 / self.vae.config.scaling_factor).sample
+            y = self._denoise(x_t, t, self.prompt, self.hints, 1.0, self._style_embeds(self.prompt))
             ev[4].record()
         torch.cuda.synchronize()
         self.split = {f"gpu.{k}": ev[i].elapsed_time(ev[i + 1])
@@ -329,7 +411,7 @@ class Restyler:
     def __init__(self, backend):
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.engine = self.pool.submit(make_engine, backend).result()
-        self.state = {"style": "ghibli", "prompt": STYLES["ghibli"], "res": 512, "strength": 0.5}
+        self.state = {"style": "ghibli", "prompt": STYLES["ghibli"], "res": 512, "strength": 0.7}
         print(f"engine ready: {self.engine.name}")
 
     async def run(self, loop, fn, *args):
@@ -357,6 +439,13 @@ class Restyler:
         if strength is not None:
             self.state["strength"] = strength
         return dict(self.state, engine=self.engine.name)
+
+    async def set_style_image(self, loop, image):
+        """image: PIL image, or None to clear. Returns False if the engine can't use one."""
+        if not hasattr(self.engine, "set_style_image"):
+            return False
+        await self.run(loop, self.engine.set_style_image, image)
+        return True
 
 
 def _resize(img, res):

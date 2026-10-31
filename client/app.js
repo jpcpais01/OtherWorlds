@@ -281,6 +281,25 @@ $("apply").onclick = () => {
   if (S.decart) S.decart.setPrompt(prompt);
   else sendControl({ type: "config", prompt });
 };
+// A photo to copy the look of (IP-Adapter). Shrunk on the phone so the upload is small.
+async function postStyleImage(blob) {
+  const r = await fetch("style-image", { method: "POST", body: blob });
+  S.note = r.ok ? (blob ? "style photo set" : "style photo cleared") : "style photo: " + await r.text();
+  $("refclear").classList.toggle("hidden", !(r.ok && blob));
+}
+$("refpick").onclick = () => $("reffile").click();
+$("reffile").onchange = async () => {
+  const file = $("reffile").files[0];
+  if (!file) return;
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 512 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  await postStyleImage(await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.9)));
+  $("reffile").value = "";
+};
+$("refclear").onclick = () => postStyleImage(null);
 $("res").onchange = () => {
   S.res = +$("res").value;
   capture.width = capture.height = S.res;

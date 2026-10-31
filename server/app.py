@@ -238,6 +238,18 @@ async def decart_token(request):
             return web.json_response({"apiKey": (await r.json())["apiKey"]})
 
 
+async def style_image(request):
+    """Body: an image file to copy the look of, or empty to go back to the style prompt."""
+    body = await request.read()
+    try:
+        image = Image.open(io.BytesIO(body)) if body else None
+    except Exception:
+        return web.Response(status=400, text="not an image")
+    if not await restyler.set_style_image(asyncio.get_running_loop(), image):
+        return web.Response(status=501, text=f"the {restyler.engine.name} engine doesn't use style images")
+    return web.Response(text="ok")
+
+
 async def index(request):
     return web.FileResponse(CLIENT_DIR / "index.html")
 
@@ -258,12 +270,13 @@ def main():
     restyler = Restyler(args.backend)
     print("phone ICE servers:", [s["urls"] for s in ice_servers()[0]])
 
-    app = web.Application()
+    app = web.Application(client_max_size=20 * 2**20)
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
     app.router.add_get("/config", config)
     app.router.add_post("/decart-token", decart_token)
     app.router.add_post("/offer", offer)
+    app.router.add_post("/style-image", style_image)
     app.router.add_get("/ws", websocket)
     app.router.add_static("/", CLIENT_DIR)
     web.run_app(app, host=args.host, port=args.port)

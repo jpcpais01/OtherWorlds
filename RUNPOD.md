@@ -39,7 +39,7 @@ Go to **Pods → Deploy**.
 - **Template:** `RunPod Pytorch 2.4.0`
   (`runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`).
 - Click **Edit Template**:
-  - Container Disk: **50 GB** (the SDXL weights are ~8 GB)
+  - Container Disk: **50 GB** (the model weights are ~12 GB)
   - No volume needed
   - Expose HTTP Ports: **8080** (keep 8888 if listed)
   - Expose TCP Ports: **22, 3478** (3478 carries WebRTC through a TURN relay)
@@ -61,7 +61,7 @@ cd /workspace
 git clone -b claude/project-thread-izhm9c https://github.com/jpcpais01/OtherWorlds
 cd OtherWorlds
 bash scripts/setup.sh      # ~3 min, ends with "setup OK on NVIDIA H100 ..."
-bash scripts/run.sh        # first run downloads ~8 GB of weights
+bash scripts/run.sh        # first run downloads ~12 GB of weights
                            # (lighter engine: bash scripts/run.sh --backend streamdiffusion)
 ```
 

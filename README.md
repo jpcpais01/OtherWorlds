@@ -2,12 +2,13 @@
 
 Prototype of real-time AI video restyling for a future AR headset. A phone
 browser streams its camera to a rented GPU, which restyles each frame with
-**SDXL-Turbo guided by a Canny-edge ControlNet** (one denoising step) and
-streams it back. A lighter StreamDiffusion + sd-turbo engine is kept for
+**SDXL-Turbo** in one denoising step, kept on the scene's shape by two
+ControlNets (Canny edges + Depth Anything depth) and pushed toward the look
+by an **IP-Adapter** style image, then streams it back. A lighter StreamDiffusion + sd-turbo engine is kept for
 cheaper GPUs (`--backend streamdiffusion`).
 
 ```
-phone camera ─▶ canvas (square crop + frame-ID code) ─▶ WebRTC ─▶ aiortc ─▶ SDXL-Turbo + ControlNet (1 step, tiny VAE) ─▶ WebRTC ─▶ phone screen
+phone camera ─▶ canvas (square crop + frame-ID code) ─▶ WebRTC ─▶ aiortc ─▶ SDXL-Turbo + edges/depth + style image (1 step) ─▶ WebRTC ─▶ phone screen
                                                         └── fallback: WebSocket + JPEG ──┘
 ```
 
@@ -80,12 +81,19 @@ python server/app.py --backend fake
 - `Strength` picks how much noise goes on the camera frame (SDXL-Turbo's
   timesteps 249/499/749/999). Higher = stronger style; the ControlNet keeps
   the scene's outlines, so even `max` stays recognisable.
-- `CN_SCALE` (env, default 0.6) sets how strictly the output follows the
-  camera's edges.
+- **Style image.** At startup the server paints one reference picture per
+  style from its prompt and feeds it to the IP-Adapter alongside the prompt,
+  which carries the look far better than text alone. **Style from photo**
+  on the phone replaces it with any picture (a film still, a painting);
+  **Clear photo** goes back to the prompt's own reference.
+- Env knobs: `IP_SCALE` (default 0.6) how much the style image counts;
+  `CN_SCALE` (0.4) edge guidance; `DEPTH_SCALE` (0.5) depth guidance. More
+  guidance keeps the room recognisable, less lets the style take over.
 - Style, strength and resolution changes apply on the next frame.
 - `COMPILE=1` (default in run.sh) compiles the UNet and ControlNet with CUDA
   graphs: on an H100 the UNet went from ~43 ms to ~16 ms at 768px. Each new
   resolution recompiles once (1-2 min pause). `COMPILE=0` skips it.
-- Measured on a RunPod H100 in France: 768px, 20 FPS, ~155 ms end to end.
+- Measured on a RunPod H100 in France (edges-only version): 768px, 20 FPS,
+  ~155 ms end to end. Depth + IP-Adapter add a few ms per frame.
 - Next steps for speed: TensorRT.
   For temporal stability: StreamDiffusionV2.
